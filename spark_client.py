@@ -923,6 +923,7 @@ def real_main():
             else:
                 master = master_nodes[0].public_dns_name
             print("Spark standalone cluster is at http://%s:8080" % master)
+            print("HDFS console is at http://%s:50070" % master)
             print("Ganglia is at http://%s:5080/ganglia" % master)
 
     elif action == "stop":
