@@ -179,7 +179,7 @@ def parse_args():
         prog="spark-ec2",
         version="%prog {v}".format(v=SPARK_EC2_VERSION),
         usage="%prog [options] <action> <cluster_name>\n\n"
-        + "<action> can be: login, stop, start, reboot-slaves, get-master, get-urls, get-nodes")
+        + "<action> can be: login, stop, start, reboot-subordinates, get-main, get-urls, get-nodes")
 
     parser.add_option(
         "-i", "--identity-file", default="spark.pem",
@@ -197,7 +197,7 @@ def parse_args():
     parser.add_option(
         "--deploy-root-dir",
         default=None,
-        help="A directory to copy into / on the first master. " +
+        help="A directory to copy into / on the first main. " +
              "Must be absolute. Note that a trailing slash is handled as per rsync: " +
              "If you omit it, the last directory of the --deploy-root-dir path will be created " +
              "in / before copying its contents. If you append the trailing slash, " +
@@ -211,8 +211,8 @@ def parse_args():
         "--swap", metavar="SWAP", type="int", default=1024,
         help="Swap space to set up per node, in MB (default: %default)")
     parser.add_option(
-        "--master-opts", type="string", default="",
-        help="Extra options to give to master through SPARK_MASTER_OPTS variable " +
+        "--main-opts", type="string", default="",
+        help="Extra options to give to main through SPARK_MASTER_OPTS variable " +
              "(e.g -Dspark.worker.timeout=180)")
     parser.add_option(
         "--vpc-id", default=None,
@@ -344,7 +344,7 @@ def get_tachyon_version(spark_version):
 def get_existing_cluster(conn, opts, cluster_name, vpc_id=None, die_on_error=True):
     """
     Get the EC2 instances in an existing cluster if available.
-    Returns a tuple of lists of EC2 instance objects for the masters and slaves.
+    Returns a tuple of lists of EC2 instance objects for the mains and subordinates.
     """
     print("Searching for existing cluster {c} in region {r}...".format(
           c=cluster_name, r=opts.region))
@@ -364,28 +364,28 @@ def get_existing_cluster(conn, opts, cluster_name, vpc_id=None, die_on_error=Tru
         instances = itertools.chain.from_iterable(r.instances for r in reservations)
         return [i for i in instances if i.state not in ["shutting-down", "terminated"]]
 
-    master_instances = get_instances([cluster_name + "-master"])
-    slave_instances = get_instances([cluster_name + "-slaves"])
+    main_instances = get_instances([cluster_name + "-main"])
+    subordinate_instances = get_instances([cluster_name + "-subordinates"])
 
-    if any((master_instances, slave_instances)):
-        print("Found {m} master{plural_m}, {s} slave{plural_s}.".format(
-              m=len(master_instances),
-              plural_m=('' if len(master_instances) == 1 else 's'),
-              s=len(slave_instances),
-              plural_s=('' if len(slave_instances) == 1 else 's')))
+    if any((main_instances, subordinate_instances)):
+        print("Found {m} main{plural_m}, {s} subordinate{plural_s}.".format(
+              m=len(main_instances),
+              plural_m=('' if len(main_instances) == 1 else 's'),
+              s=len(subordinate_instances),
+              plural_s=('' if len(subordinate_instances) == 1 else 's')))
 
-    if not master_instances and die_on_error:
-        print("ERROR: Could not find a master for cluster {c} in region {r}.".format(
+    if not main_instances and die_on_error:
+        print("ERROR: Could not find a main for cluster {c} in region {r}.".format(
               c=cluster_name, r=opts.region), file=sys.stderr)
         sys.exit(1)
 
-    return (master_instances, slave_instances)
+    return (main_instances, subordinate_instances)
 
 
 # Deploy configuration files and run setup scripts on a newly launched
 # or started EC2 cluster.
-def setup_cluster(conn, master_nodes, slave_nodes, opts):
-    master = master_nodes[0].public_dns_name
+def setup_cluster(conn, main_nodes, subordinate_nodes, opts):
+    main = main_nodes[0].public_dns_name
 
     modules = ['spark', 'ephemeral-hdfs', 'persistent-hdfs',
                'mapreduce', 'spark-standalone', 'tachyon', 'rstudio', 'ganglia']
@@ -399,10 +399,10 @@ def setup_cluster(conn, master_nodes, slave_nodes, opts):
 
     # NOTE: We should clone the repository before running deploy_files to
     # prevent ec2-variables.sh from being overwritten
-    print("Cloning spark-ec2 scripts from {r}/tree/{b} on master...".format(
+    print("Cloning spark-ec2 scripts from {r}/tree/{b} on main...".format(
         r=DEFAULT_SPARK_EC2_GITHUB_REPO, b=DEFAULT_SPARK_EC2_BRANCH))
     ssh(
-        host=master,
+        host=main,
         opts=opts,
         command="rm -rf spark-ec2"
         + " && "
@@ -410,34 +410,34 @@ def setup_cluster(conn, master_nodes, slave_nodes, opts):
                                                   b=DEFAULT_SPARK_EC2_BRANCH)
     )
 
-    print("Deploying files to master...")
+    print("Deploying files to main...")
     deploy_files(
         conn=conn,
         root_dir=SPARK_EC2_DIR + "/" + "deploy.generic",
         opts=opts,
-        master_nodes=master_nodes,
-        slave_nodes=slave_nodes,
+        main_nodes=main_nodes,
+        subordinate_nodes=subordinate_nodes,
         modules=modules
     )
 
     if opts.deploy_root_dir is not None:
-        print("Deploying {s} to master...".format(s=opts.deploy_root_dir))
+        print("Deploying {s} to main...".format(s=opts.deploy_root_dir))
         deploy_user_files(
             root_dir=opts.deploy_root_dir,
             opts=opts,
-            master_nodes=master_nodes
+            main_nodes=main_nodes
         )
 
-    print("Running setup on master...")
-    setup_spark_cluster(master, opts)
+    print("Running setup on main...")
+    setup_spark_cluster(main, opts)
     print("Done!")
 
 
-def setup_spark_cluster(master, opts):
-    ssh(master, opts, "chmod u+x spark-ec2/setup.sh")
-    ssh(master, opts, "spark-ec2/setup.sh")
-    print("Spark standalone cluster started at http://%s:8080" % master)
-    print("Ganglia started at http://%s:5080/ganglia" % master)
+def setup_spark_cluster(main, opts):
+    ssh(main, opts, "chmod u+x spark-ec2/setup.sh")
+    ssh(main, opts, "spark-ec2/setup.sh")
+    print("Spark standalone cluster started at http://%s:8080" % main)
+    print("Ganglia started at http://%s:5080/ganglia" % main)
 
 
 def is_ssh_available(host, opts, print_ssh_output=True):
@@ -604,13 +604,13 @@ def get_num_disks(instance_type):
 
 # Deploy the configuration file templates in a given local directory to
 # a cluster, filling in any template parameters with information about the
-# cluster (e.g. lists of masters and slaves). Files are only deployed to
-# the first master instance in the cluster, and we expect the setup
+# cluster (e.g. lists of mains and subordinates). Files are only deployed to
+# the first main instance in the cluster, and we expect the setup
 # script to be run on that instance to copy them to other nodes.
 #
 # root_dir should be an absolute path to the directory with the files we want to deploy.
-def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
-    active_master = master_nodes[0].public_dns_name
+def deploy_files(conn, root_dir, opts, main_nodes, subordinate_nodes, modules):
+    active_main = main_nodes[0].public_dns_name
 
     num_disks = get_num_disks(opts.instance_type)
     hdfs_data_dirs = "/mnt/ephemeral-hdfs/data"
@@ -622,7 +622,7 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
             mapred_local_dirs += ",/mnt%d/hadoop/mrlocal" % i
             spark_local_dirs += ",/mnt%d/spark" % i
 
-    cluster_url = "%s:7077" % active_master
+    cluster_url = "%s:7077" % active_main
 
     if "." in opts.spark_version:
         # Pre-built Spark deploy
@@ -638,13 +638,13 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
       print("No valid Tachyon version found; Tachyon won't be set up")
       modules.remove("tachyon")
 
-    master_addresses = [i.public_dns_name for i in master_nodes]
-    slave_addresses = [i.public_dns_name for i in slave_nodes]
+    main_addresses = [i.public_dns_name for i in main_nodes]
+    subordinate_addresses = [i.public_dns_name for i in subordinate_nodes]
     worker_instances_str = "%d" % opts.worker_instances if opts.worker_instances else ""
     template_vars = {
-        "master_list": '\n'.join(master_addresses),
-        "active_master": active_master,
-        "slave_list": '\n'.join(slave_addresses),
+        "main_list": '\n'.join(main_addresses),
+        "active_main": active_main,
+        "subordinate_list": '\n'.join(subordinate_addresses),
         "cluster_url": cluster_url,
         "hdfs_data_dirs": hdfs_data_dirs,
         "mapred_local_dirs": mapred_local_dirs,
@@ -655,7 +655,7 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
         "tachyon_version": tachyon_v,
         "hadoop_major_version": opts.hadoop_major_version,
         "spark_worker_instances": worker_instances_str,
-        "spark_master_opts": opts.master_opts
+        "spark_main_opts": opts.main_opts
     }
     try:
         cred=open("hadoop.aws")
@@ -693,12 +693,12 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
                                 text = text.replace("{{" + key + "}}", template_vars[key])
                             dest.write(text)
                             dest.close()
-    # rsync the whole directory over to the master machine
+    # rsync the whole directory over to the main machine
     command = [
         'rsync', '-rv',
         '-e', stringify_command(ssh_command(opts)),
         "%s/" % tmp_dir,
-        "%s@%s:/" % (DEFAULT_USER, active_master)
+        "%s@%s:/" % (DEFAULT_USER, active_main)
     ]
     subprocess.check_call(command)
     # Remove the temp directory we created above
@@ -708,16 +708,16 @@ def deploy_files(conn, root_dir, opts, master_nodes, slave_nodes, modules):
 # Deploy a given local directory to a cluster, WITHOUT parameter substitution.
 # Note that unlike deploy_files, this works for binary files.
 # Also, it is up to the user to add (or not) the trailing slash in root_dir.
-# Files are only deployed to the first master instance in the cluster.
+# Files are only deployed to the first main instance in the cluster.
 #
 # root_dir should be an absolute path.
-def deploy_user_files(root_dir, opts, master_nodes):
-    active_master = master_nodes[0].public_dns_name
+def deploy_user_files(root_dir, opts, main_nodes):
+    active_main = main_nodes[0].public_dns_name
     command = [
         'rsync', '-rv',
         '-e', stringify_command(ssh_command(opts)),
         "%s" % root_dir,
-        "%s@%s:/" % (DEFAULT_USER, active_master)
+        "%s@%s:/" % (DEFAULT_USER, active_main)
     ]
     subprocess.check_call(command)
 
@@ -862,74 +862,74 @@ def real_main():
     vpc_id=opts.vpc_id
 
     if action == "login":
-        (master_nodes, slave_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
-        if not nodes_running(master_nodes):
-            print("Cluster " + cluster_name + " does not appear to have any running master nodes.")
+        (main_nodes, subordinate_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
+        if not nodes_running(main_nodes):
+            print("Cluster " + cluster_name + " does not appear to have any running main nodes.")
         else:
-            if not master_nodes[0].public_dns_name:
-                master = master_nodes[0].ip_address
+            if not main_nodes[0].public_dns_name:
+                main = main_nodes[0].ip_address
             else:
-                master = master_nodes[0].public_dns_name
-            print("Logging into master " + master + "...")
+                main = main_nodes[0].public_dns_name
+            print("Logging into main " + main + "...")
             subprocess.check_call(
-                ssh_command(opts) + ['-t', '-t', "%s@%s" % (DEFAULT_USER, master)])
+                ssh_command(opts) + ['-t', '-t', "%s@%s" % (DEFAULT_USER, main)])
 
-    elif action == "reboot-slaves":
-        (master_nodes, slave_nodes) = get_existing_cluster(
+    elif action == "reboot-subordinates":
+        (main_nodes, subordinate_nodes) = get_existing_cluster(
             conn, opts, cluster_name, vpc_id, die_on_error=False)
-        if not nodes_running(slave_nodes):
-            print("Cluster " + cluster_name + " does not appear to have any running slave nodes.")
+        if not nodes_running(subordinate_nodes):
+            print("Cluster " + cluster_name + " does not appear to have any running subordinate nodes.")
         else:
             response = raw_input(
                 "Are you sure you want to reboot the cluster " +
-                cluster_name + " slaves?\n" +
-                "Reboot cluster slaves " + cluster_name + " (y/N): ")
+                cluster_name + " subordinates?\n" +
+                "Reboot cluster subordinates " + cluster_name + " (y/N): ")
             if response == "y":
-                print("Rebooting slaves...")
-                for inst in slave_nodes:
+                print("Rebooting subordinates...")
+                for inst in subordinate_nodes:
                     if inst.state not in ["shutting-down", "terminated", "stopped"]:
                         print("Rebooting " + inst.id)
                         inst.reboot()
 
-    elif action == "get-master":
-        (master_nodes, slave_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
-        if not nodes_running(master_nodes):
-            print("Cluster " + cluster_name + " does not appear to have any running master nodes.")
+    elif action == "get-main":
+        (main_nodes, subordinate_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
+        if not nodes_running(main_nodes):
+            print("Cluster " + cluster_name + " does not appear to have any running main nodes.")
         else:
-            print(master_nodes[0].public_dns_name)
+            print(main_nodes[0].public_dns_name)
 
     elif action == "get-nodes":
-        (master_nodes, slave_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
-        for i in master_nodes:
+        (main_nodes, subordinate_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
+        for i in main_nodes:
             if i.public_dns_name:
                 name=i.public_dns_name
             else:
                 name=i.private_ip_address
-            print("Master {m} is {s}".format(m=name,s=i.state))
-        for i in slave_nodes:
+            print("Main {m} is {s}".format(m=name,s=i.state))
+        for i in subordinate_nodes:
             if i.public_dns_name:
                 name=i.public_dns_name
             else:
                 name=i.private_ip_address
-            print("Slave {m} is {s}".format(m=name,s=i.state))
+            print("Subordinate {m} is {s}".format(m=name,s=i.state))
 
     elif action == "get-urls":
-        (master_nodes, slave_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
-        if not nodes_running(master_nodes):
-            print("Cluster " + cluster_name + " does not appear to have any running master nodes.")
+        (main_nodes, subordinate_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
+        if not nodes_running(main_nodes):
+            print("Cluster " + cluster_name + " does not appear to have any running main nodes.")
         else:
-            if not master_nodes[0].public_dns_name:
-                master=master_nodes[0].ip_address
+            if not main_nodes[0].public_dns_name:
+                main=main_nodes[0].ip_address
             else:
-                master = master_nodes[0].public_dns_name
-            print("Spark standalone cluster is at http://%s:8080" % master)
-            print("HDFS console is at http://%s:50070" % master)
-            print("Ganglia is at http://%s:5080/ganglia" % master)
+                main = main_nodes[0].public_dns_name
+            print("Spark standalone cluster is at http://%s:8080" % main)
+            print("HDFS console is at http://%s:50070" % main)
+            print("Ganglia is at http://%s:5080/ganglia" % main)
 
     elif action == "stop":
-        (master_nodes, slave_nodes) = get_existing_cluster(
+        (main_nodes, subordinate_nodes) = get_existing_cluster(
             conn, opts, cluster_name, vpc_id, die_on_error=False)
-        if not nodes_running(master_nodes + slave_nodes):
+        if not nodes_running(main_nodes + subordinate_nodes):
             print("Cluster " + cluster_name + " has no running nodes.")
         else:
             response = raw_input(
@@ -937,15 +937,15 @@ def real_main():
                 cluster_name + "?\nDATA ON EPHEMERAL DISKS WILL BE LOST, " +
                 "BUT THE CLUSTER WILL KEEP USING SPACE ON\n" +
                 "AMAZON EBS IF IT IS EBS-BACKED!!\n" +
-                "All data on spot-instance slaves will be lost.\n" +
+                "All data on spot-instance subordinates will be lost.\n" +
                 "Stop cluster " + cluster_name + " (y/N): ")
             if response == "y":
-                print("Stopping master...")
-                for inst in master_nodes:
+                print("Stopping main...")
+                for inst in main_nodes:
                     if inst.state not in ["shutting-down", "terminated"]:
                         inst.stop()
-                print("Stopping slaves...")
-                for inst in slave_nodes:
+                print("Stopping subordinates...")
+                for inst in subordinate_nodes:
                     if inst.state not in ["shutting-down", "terminated"]:
                         if inst.spot_instance_request_id:
                             inst.terminate()
@@ -953,33 +953,33 @@ def real_main():
                             inst.stop()
 
     elif action == "start":
-        (master_nodes, slave_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
-        print("Starting slaves...")
-        for inst in slave_nodes:
+        (main_nodes, subordinate_nodes) = get_existing_cluster(conn, opts, cluster_name, vpc_id)
+        print("Starting subordinates...")
+        for inst in subordinate_nodes:
             if inst.state not in ["shutting-down", "terminated"]:
                 inst.start()
-        print("Starting master...")
-        for inst in master_nodes:
+        print("Starting main...")
+        for inst in main_nodes:
             if inst.state not in ["shutting-down", "terminated"]:
                 inst.start()
         wait_for_cluster_state(
             conn=conn,
             opts=opts,
-            cluster_instances=(master_nodes + slave_nodes),
+            cluster_instances=(main_nodes + subordinate_nodes),
             cluster_state='ssh-ready'
         )
 
         # Determine types of running instances
-        existing_master_type = master_nodes[0].instance_type
-        existing_slave_type = slave_nodes[0].instance_type
-        # Setting opts.master_instance_type to the empty string indicates we
-        # have the same instance type for the master and the slaves
-        if existing_master_type == existing_slave_type:
-            existing_master_type = ""
-        opts.master_instance_type = existing_master_type
-        opts.instance_type = existing_slave_type
+        existing_main_type = main_nodes[0].instance_type
+        existing_subordinate_type = subordinate_nodes[0].instance_type
+        # Setting opts.main_instance_type to the empty string indicates we
+        # have the same instance type for the main and the subordinates
+        if existing_main_type == existing_subordinate_type:
+            existing_main_type = ""
+        opts.main_instance_type = existing_main_type
+        opts.instance_type = existing_subordinate_type
 
-        setup_cluster(conn, master_nodes, slave_nodes, opts)
+        setup_cluster(conn, main_nodes, subordinate_nodes, opts)
 
     else:
         print("Invalid action: %s" % action, file=stderr)
